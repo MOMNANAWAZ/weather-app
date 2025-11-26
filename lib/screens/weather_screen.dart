@@ -2,10 +2,48 @@ import 'package:flutter/material.dart';
 import '../models/weather_model.dart';
 import '../services/weather_service.dart';
 import '../services/local_storage.dart';
+import 'dart:convert';
 
 class WeatherScreen extends StatefulWidget {
   @override
   _WeatherScreenState createState() => _WeatherScreenState();
+}
+
+// Simple history item class - defined within the same file
+class _WeatherHistoryItem {
+  final String cityName;
+  final double temperature;
+  final String description;
+  final String iconCode;
+  final DateTime timestamp;
+
+  _WeatherHistoryItem({
+    required this.cityName,
+    required this.temperature,
+    required this.description,
+    required this.iconCode,
+    required this.timestamp,
+  });
+
+  Map<String, dynamic> toJson() {
+    return {
+      'cityName': cityName,
+      'temperature': temperature,
+      'description': description,
+      'iconCode': iconCode,
+      'timestamp': timestamp.toIso8601String(),
+    };
+  }
+
+  factory _WeatherHistoryItem.fromJson(Map<String, dynamic> json) {
+    return _WeatherHistoryItem(
+      cityName: json['cityName'],
+      temperature: json['temperature'].toDouble(),
+      description: json['description'],
+      iconCode: json['iconCode'],
+      timestamp: DateTime.parse(json['timestamp']),
+    );
+  }
 }
 
 class _WeatherScreenState extends State<WeatherScreen> {
@@ -18,11 +56,17 @@ class _WeatherScreenState extends State<WeatherScreen> {
   String _errorMessage = '';
   bool _hasError = false;
   bool _isDayMode = true;
+  List<_WeatherHistoryItem> _weatherHistory = [];
+  bool _showHistory = false;
+
+  // Storage keys
+  static const String _weatherHistoryKey = 'weather_history';
 
   @override
   void initState() {
     super.initState();
     _loadLastCity();
+    _loadWeatherHistory();
     final hour = DateTime.now().hour;
     _isDayMode = hour >= 6 && hour < 18;
   }
@@ -35,9 +79,39 @@ class _WeatherScreenState extends State<WeatherScreen> {
     }
   }
 
+  Future<void> _loadWeatherHistory() async {
+    final prefs = await LocalStorage.getPrefs();
+    final String? historyJson = prefs.getString(_weatherHistoryKey);
+
+    if (historyJson == null) {
+      return;
+    }
+
+    try {
+      final List<dynamic> historyList = json.decode(historyJson);
+      setState(() {
+        _weatherHistory = historyList.map((item) => _WeatherHistoryItem.fromJson(item)).toList();
+      });
+    } catch (e) {
+      print('Error loading history: $e');
+    }
+  }
+
+  Future<void> _saveWeatherHistory() async {
+    final prefs = await LocalStorage.getPrefs();
+    final String historyJson = json.encode(_weatherHistory.map((item) => item.toJson()).toList());
+    await prefs.setString(_weatherHistoryKey, historyJson);
+  }
+
   void _toggleDayNight() {
     setState(() {
       _isDayMode = !_isDayMode;
+    });
+  }
+
+  void _toggleHistory() {
+    setState(() {
+      _showHistory = !_showHistory;
     });
   }
 
@@ -46,18 +120,32 @@ class _WeatherScreenState extends State<WeatherScreen> {
       _isLoading = true;
       _hasError = false;
       _errorMessage = '';
+      _showHistory = false;
     });
 
     try {
       final currentWeatherData = await _weatherService.getCurrentWeather(city);
       final forecastData = await _weatherService.getForecast(city);
 
+      final weatherData = WeatherData.fromJson(currentWeatherData);
+      final forecast = _processForecastData(forecastData);
+
       setState(() {
-        _currentWeather = WeatherData.fromJson(currentWeatherData);
-        _forecast = _processForecastData(forecastData);
+        _currentWeather = weatherData;
+        _forecast = forecast;
         _hasError = false;
       });
 
+      // Add to history
+      final historyItem = _WeatherHistoryItem(
+        cityName: city,
+        temperature: weatherData.temperature,
+        description: weatherData.description,
+        iconCode: weatherData.iconCode,
+        timestamp: DateTime.now(),
+      );
+
+      _addToHistory(historyItem);
       await LocalStorage.saveLastCity(city);
     } catch (e) {
       setState(() {
@@ -71,6 +159,34 @@ class _WeatherScreenState extends State<WeatherScreen> {
         _isLoading = false;
       });
     }
+  }
+
+  void _addToHistory(_WeatherHistoryItem historyItem) {
+    // Remove duplicates of the same city
+    _weatherHistory.removeWhere((item) => item.cityName.toLowerCase() == historyItem.cityName.toLowerCase());
+
+    // Add new item to beginning
+    _weatherHistory.insert(0, historyItem);
+
+    // Keep only last 15 items
+    if (_weatherHistory.length > 15) {
+      _weatherHistory.removeRange(15, _weatherHistory.length);
+    }
+
+    _saveWeatherHistory();
+  }
+
+  Future<void> _loadFromHistory(_WeatherHistoryItem historyItem) async {
+    _searchController.text = historyItem.cityName;
+    await _fetchWeather(historyItem.cityName);
+  }
+
+  Future<void> _clearHistory() async {
+    final prefs = await LocalStorage.getPrefs();
+    await prefs.remove(_weatherHistoryKey);
+    setState(() {
+      _weatherHistory.clear();
+    });
   }
 
   List<ForecastData> _processForecastData(Map<String, dynamic> data) {
@@ -192,13 +308,25 @@ class _WeatherScreenState extends State<WeatherScreen> {
                   ),
                 ],
               ),
-              IconButton(
-                icon: Icon(
-                  _isDayMode ? Icons.nightlight_round : Icons.wb_sunny,
-                  color: Colors.white,
-                  size: 24,
-                ),
-                onPressed: _toggleDayNight,
+              Row(
+                children: [
+                  IconButton(
+                    icon: Icon(
+                      Icons.history,
+                      color: Colors.white,
+                      size: 24,
+                    ),
+                    onPressed: _toggleHistory,
+                  ),
+                  IconButton(
+                    icon: Icon(
+                      _isDayMode ? Icons.nightlight_round : Icons.wb_sunny,
+                      color: Colors.white,
+                      size: 24,
+                    ),
+                    onPressed: _toggleDayNight,
+                  ),
+                ],
               ),
             ],
           ),
@@ -206,7 +334,6 @@ class _WeatherScreenState extends State<WeatherScreen> {
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              // Temperature display - NO grey circle background
               Container(
                 padding: EdgeInsets.all(8),
                 child: Column(
@@ -376,6 +503,130 @@ class _WeatherScreenState extends State<WeatherScreen> {
     );
   }
 
+  Widget _buildHistoryScreen() {
+    return Column(
+      children: [
+        Padding(
+          padding: EdgeInsets.all(16),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'Search History',
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                  color: _textColor,
+                ),
+              ),
+              if (_weatherHistory.isNotEmpty)
+                TextButton(
+                  onPressed: _clearHistory,
+                  child: Text(
+                    'Clear All',
+                    style: TextStyle(
+                      color: Colors.red,
+                      fontSize: 14,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: _weatherHistory.isEmpty
+              ? Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.history, size: 80, color: _secondaryTextColor),
+                SizedBox(height: 20),
+                Text(
+                  'No search history',
+                  style: TextStyle(
+                    fontSize: 18,
+                    color: _textColor,
+                  ),
+                ),
+                SizedBox(height: 10),
+                Text(
+                  'Your searched cities will appear here',
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: _secondaryTextColor,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            ),
+          )
+              : ListView.builder(
+            padding: EdgeInsets.symmetric(horizontal: 16),
+            itemCount: _weatherHistory.length,
+            itemBuilder: (context, index) {
+              final historyItem = _weatherHistory[index];
+              return _buildHistoryItem(historyItem);
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildHistoryItem(_WeatherHistoryItem historyItem) {
+    return Container(
+      margin: EdgeInsets.only(bottom: 8),
+      padding: EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: _cardColor,
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: _isDayMode ? Colors.grey.withOpacity(0.1) : Colors.black.withOpacity(0.3),
+            blurRadius: 10,
+            offset: Offset(0, 2),
+          ),
+        ],
+      ),
+      child: ListTile(
+        leading: Image.network(
+          'https://openweathermap.org/img/wn/${historyItem.iconCode}.png',
+          width: 50,
+          height: 50,
+          errorBuilder: (context, error, stackTrace) {
+            return Icon(
+              Icons.wb_sunny,
+              size: 30,
+              color: _isDayMode ? Colors.amber : Colors.yellow[100],
+            );
+          },
+        ),
+        title: Text(
+          historyItem.cityName,
+          style: TextStyle(
+            fontSize: 18,
+            fontWeight: FontWeight.bold,
+            color: _textColor,
+          ),
+        ),
+        subtitle: Text(
+          '${historyItem.temperature.round()}° • ${historyItem.description}',
+          style: TextStyle(
+            color: _secondaryTextColor,
+          ),
+        ),
+        trailing: Text(
+          _formatTime(historyItem.timestamp),
+          style: TextStyle(
+            color: _secondaryTextColor,
+            fontSize: 12,
+          ),
+        ),
+        onTap: () => _loadFromHistory(historyItem),
+      ),
+    );
+  }
+
   String _formatDate(DateTime date) {
     final months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     final days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -384,6 +635,12 @@ class _WeatherScreenState extends State<WeatherScreen> {
     int monthIndex = date.month - 1;
 
     return '${days[weekdayIndex]}, ${date.day} ${months[monthIndex]}';
+  }
+
+  String _formatTime(DateTime date) {
+    final hour = date.hour.toString().padLeft(2, '0');
+    final minute = date.minute.toString().padLeft(2, '0');
+    return '$hour:$minute';
   }
 
   String _formatForecastDate(DateTime date) {
@@ -528,6 +785,8 @@ class _WeatherScreenState extends State<WeatherScreen> {
               )
                   : _hasError
                   ? _buildErrorScreen()
+                  : _showHistory
+                  ? _buildHistoryScreen()
                   : (_currentWeather == null && _forecast.isEmpty)
                   ? Center(
                 child: Column(
@@ -541,6 +800,17 @@ class _WeatherScreenState extends State<WeatherScreen> {
                         fontSize: 20,
                         color: _textColor,
                         fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    SizedBox(height: 10),
+                    TextButton(
+                      onPressed: _toggleHistory,
+                      child: Text(
+                        'View Search History',
+                        style: TextStyle(
+                          fontSize: 16,
+                          color: _primaryColor,
+                        ),
                       ),
                     ),
                   ],
